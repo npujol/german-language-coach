@@ -1,0 +1,417 @@
+#!/usr/bin/env node
+
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels, createProvider } from "@earendil-works/pi-ai/models";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { AssistantEntry, createRegistry, defineDoc, Harness } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import lockfile from "proper-lockfile";
+import { chmod, mkdir, open, rmdir, unlink, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { scanPiSessions } from "./pi-session-import.mjs";
+import { buildProgressPrompt, buildReviewPrompt, COACH_INSTRUCTIONS } from "./prompt.mjs";
+
+export const DEFAULT_DATA_DIR = process.env.GERMAN_COACH_DATA_DIR ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pi-german-coach");
+export const DEFAULT_PI_SESSIONS_DIR = process.env.PI_SESSIONS_DIR ?? join(homedir(), ".pi", "agent", "sessions");
+export const DATA_FILE_NAME = "coach.sqlite";
+
+const ImportedWriting = defineDoc({
+  kind: "app.german-coach.imported-writing",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ entries: [] }),
+  checkpointWhen: () => true,
+});
+
+function isLoopbackHostname(hostname) {
+  return hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+export function validateLocalBaseUrl(value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("LLAMA_CPP_BASE_URL is required");
+  let url;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    throw new Error(`LLAMA_CPP_BASE_URL is not a valid URL: ${error.message}`, { cause: error });
+  }
+  if (!(["http:", "https:"].includes(url.protocol)) || !isLoopbackHostname(url.hostname) || url.username || url.password || url.search || url.hash) {
+    throw new Error("LLAMA_CPP_BASE_URL must be an http(s) URL using only 127.0.0.1 or [::1], with no credentials, query, or fragment");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  if (!url.pathname.endsWith("/v1")) throw new Error("LLAMA_CPP_BASE_URL must end in /v1");
+  return url.toString().replace(/\/$/, "");
+}
+
+function assertLocalRequestUrl(input, endpoint) {
+  const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
+  const url = new URL(requestUrl);
+  const expectedPath = `${endpoint.pathname}/chat/completions`;
+  if (url.origin !== endpoint.origin || url.pathname !== expectedPath) {
+    throw new Error(`Blocked model request outside the configured local completion endpoint: ${url.origin}${url.pathname}`);
+  }
+}
+
+export function localOnlyFetch(baseUrl, nativeFetch = globalThis.fetch.bind(globalThis)) {
+  const endpoint = new URL(validateLocalBaseUrl(baseUrl));
+  return async (input, init = {}) => {
+    assertLocalRequestUrl(input, endpoint);
+    const response = await nativeFetch(input, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`Blocked model endpoint redirect (HTTP ${response.status}); local-only requests may not redirect`);
+    }
+    return response;
+  };
+}
+
+async function resolveLocalModelId(endpoint, configuredModelId) {
+  if (typeof configuredModelId === "string" && configuredModelId.trim()) return configuredModelId.trim();
+
+  const url = new URL(`${endpoint}/models`);
+  const headers = { Authorization: `Bearer ${process.env.LLAMA_CPP_API_KEY ?? "local"}` };
+  const response = await globalThis.fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5000) });
+  if (response.status >= 300 && response.status < 400) throw new Error("Blocked local model-list redirect");
+  if (!response.ok) throw new Error(`Local llama.cpp model-list request failed with HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload || !Array.isArray(payload.data) || payload.data.some((model) => typeof model?.id !== "string" || !model.id.trim())) {
+    throw new Error("Local llama.cpp returned an invalid /models response");
+  }
+  const ids = [...new Set(payload.data.map((model) => model.id.trim()))];
+  if (ids.length === 0) throw new Error("Local llama.cpp lists no models at /models");
+  if (ids.length > 1) throw new Error(`Local llama.cpp lists multiple models; set GERMAN_COACH_MODEL_ID to one of: ${ids.join(", ")}`);
+  return ids[0];
+}
+
+export async function createLocalModels({ baseUrl = process.env.LLAMA_CPP_BASE_URL, modelId = process.env.GERMAN_COACH_MODEL_ID } = {}) {
+  const endpoint = validateLocalBaseUrl(baseUrl);
+  const selectedModelId = await resolveLocalModelId(endpoint, modelId);
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  const api = openAICompletionsApi();
+  const providerId = "llama-cpp-local";
+  const model = {
+    id: selectedModelId,
+    name: selectedModelId,
+    api: "openai-completions",
+    provider: providerId,
+    baseUrl: endpoint,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: Number.parseInt(process.env.GERMAN_COACH_CONTEXT_WINDOW ?? "32768", 10),
+    maxTokens: Number.parseInt(process.env.GERMAN_COACH_MAX_TOKENS ?? "4096", 10),
+    compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
+  };
+  if (!Number.isSafeInteger(model.contextWindow) || model.contextWindow < 1024) throw new Error("GERMAN_COACH_CONTEXT_WINDOW must be an integer >= 1024");
+  if (!Number.isSafeInteger(model.maxTokens) || model.maxTokens < 1) throw new Error("GERMAN_COACH_MAX_TOKENS must be a positive integer");
+
+  const provider = createProvider({
+    id: providerId,
+    name: "Local llama.cpp",
+    baseUrl: endpoint,
+    auth: {
+      apiKey: {
+        name: "Local llama.cpp",
+        resolve: async () => ({ auth: { apiKey: process.env.LLAMA_CPP_API_KEY ?? "local" }, source: "loopback llama.cpp" }),
+      },
+    },
+    models: [model],
+    api: {
+      stream: (requestedModel, context, options) => api.stream(requestedModel, context, { ...options, fetch: localOnlyFetch(endpoint, nativeFetch) }),
+      streamSimple: (requestedModel, context, options) => api.streamSimple(requestedModel, context, { ...options, fetch: localOnlyFetch(endpoint, nativeFetch) }),
+    },
+  });
+  const models = createModels();
+  models.setProvider(provider);
+  return { models, modelRef: { provider: providerId, modelId: model.id }, endpoint };
+}
+
+async function ensurePrivateDataDirectory(dataDir) {
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await chmod(dataDir, 0o700);
+  const databasePath = join(dataDir, DATA_FILE_NAME);
+  const handle = await open(databasePath, "a", 0o600);
+  try {
+    await handle.chmod(0o600);
+  } finally {
+    await handle.close();
+  }
+  return databasePath;
+}
+
+export async function acquireCoachLock(databasePath) {
+  try {
+    return await lockfile.lock(databasePath, { retries: 0, stale: 30_000, update: 10_000 });
+  } catch (error) {
+    if (error.code === "ELOCKED") throw new Error(`Pi German Coach already owns ${databasePath}`, { cause: error });
+    throw error;
+  }
+}
+
+async function ensureImportedWriting(harness, root, context) {
+  await root.commit(async (tx) => { await tx.doc(ImportedWriting, root.id); }, context);
+  return await harness.snapshot(ImportedWriting, root.id, context);
+}
+
+export async function importPiWriting({ harness, root, context, sessionsDir = DEFAULT_PI_SESSIONS_DIR, from, through }) {
+  const scanned = await scanPiSessions({ root: sessionsDir, from, through });
+  const snapshot = await ensureImportedWriting(harness, root, context);
+  const known = new Set(snapshot.entries.map((entry) => entry.sourceKey));
+  const additions = scanned.messages.filter((entry) => !known.has(entry.sourceKey));
+
+  if (additions.length) {
+    await root.commit(async (tx) => {
+      const doc = await tx.doc(ImportedWriting, root.id);
+      const committed = new Set(doc.entries.map((entry) => entry.sourceKey));
+      for (const entry of additions) {
+        if (!committed.has(entry.sourceKey)) doc.entries.push({ ...entry, excluded: false });
+      }
+    }, context);
+  }
+
+  return {
+    imported: additions.length,
+    german: additions.filter((entry) => entry.classification === "german").length,
+    uncertain: additions.filter((entry) => entry.classification === "uncertain").length,
+    issues: scanned.issues,
+  };
+}
+
+export async function getImportedWriting(harness, root, context) {
+  const snapshot = await ensureImportedWriting(harness, root, context);
+  return snapshot.entries;
+}
+
+export async function excludeImportedEntry({ harness, root, context, sourceKey }) {
+  await root.commit(async (tx) => {
+    const doc = await tx.doc(ImportedWriting, root.id);
+    const target = doc.entries.find((item) => item.sourceKey === sourceKey);
+    if (!target) throw new Error(`No imported entry found for ${sourceKey}`);
+    target.excluded = true;
+  }, context);
+}
+
+async function sendInput(root, context, content, output) {
+  const submission = await root.submit({ type: "input", content }, context);
+  const settled = await submission.wait(context);
+  if (settled.status !== "done" || settled.type !== "input") {
+    throw new Error(`Coach run did not complete: ${settled.status}${settled.reason ? ` (${settled.reason})` : ""}`);
+  }
+  const answer = await root.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+  const text = answer?.model?.[0]?.content?.filter((block) => block.type === "text").map((block) => block.text).join("") ?? "";
+  if (!text) throw new Error("Local model returned no text answer");
+  output(text);
+  return text;
+}
+
+function currentLocalDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function selectEntries(entries, from, through) {
+  return entries.filter((entry) => !entry.excluded && (!from || entry.localDate >= from) && (!through || entry.localDate <= through));
+}
+
+function isCalendarDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function parseReviewRange(args) {
+  if (args.length === 0 || args[0] === "live" || args[0] === "today") {
+    const today = currentLocalDate();
+    return { from: today, through: today };
+  }
+  if (args[0] === "all") return {};
+  if (args.length > 2) throw new Error("Use /review [live|today|all|YYYY-MM-DD [YYYY-MM-DD]]");
+  const [from, through = from] = args;
+  for (const value of [from, through]) {
+    if (!isCalendarDate(value)) throw new Error("Use /review [live|today|all|YYYY-MM-DD [YYYY-MM-DD]]");
+  }
+  if (from > through) throw new Error("Review start date must not be after end date");
+  return { from, through };
+}
+
+function showUsage() {
+  return [
+    "German coach commands:",
+    "  /sync [FROM [THROUGH]]  import Pi user writing locally; no model request",
+    "  /review [live|today|all|DATE [THROUGH]]",
+    "  /progress               ask the local model for a learning summary",
+    "  /list                   show imported entry IDs, date, and classification",
+    "  /exclude SESSION:ENTRY  omit an entry from future reviews (not physical deletion)",
+    "  /export [FILE]          export local writing and source metadata",
+    "  /reset                  erase the complete coach database after confirmation",
+    "  /help  /exit",
+    "Plain text asks the local coach for feedback.",
+  ].join("\n");
+}
+
+async function exportWriting(entries, path) {
+  const json = `${JSON.stringify(entries, null, 2)}\n`;
+  if (!path) return json;
+  const target = resolve(path);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  await chmod(target, 0o600);
+  return `Export written to ${target}`;
+}
+
+async function requestFullReset(rl, output, confirmReset) {
+  const prompt = "This deletes the entire local Durable coach database. Type RESET to confirm: ";
+  const answer = confirmReset ? await confirmReset(prompt) : await rl.question(prompt);
+  if (answer !== "RESET") {
+    output("Reset cancelled.");
+    return false;
+  }
+  return true;
+}
+
+async function eraseDatabaseFiles(databasePath) {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try {
+      await unlink(`${databasePath}${suffix}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+}
+
+export async function runCoach({
+  dataDir = DEFAULT_DATA_DIR,
+  sessionsDir = DEFAULT_PI_SESSIONS_DIR,
+  modelId = process.env.GERMAN_COACH_MODEL_ID,
+  baseUrl = process.env.LLAMA_CPP_BASE_URL,
+  models: injectedModels,
+  storage: injectedStorage,
+  input = process.stdin,
+  outputStream = process.stdout,
+  output = (message) => outputStream.write(`${message}\n`),
+  context = BACKGROUND_CONTEXT,
+  confirmReset,
+} = {}) {
+  const databasePath = await ensurePrivateDataDirectory(dataDir);
+  const localModel = injectedModels ? null : await createLocalModels({ baseUrl, modelId });
+  const models = injectedModels ?? localModel.models;
+  const modelRef = localModel?.modelRef;
+  const releaseLock = await acquireCoachLock(databasePath);
+  let storage;
+  let harness;
+  let rl;
+  let resetRequested = false;
+
+  try {
+    storage = injectedStorage ?? await openNodeSqliteStorage(databasePath);
+    harness = await Harness.open(storage, {
+      models,
+      registry: createRegistry(),
+      settings: { extensions: [], compaction: { enabled: true, reserveTokens: 4096, keepRecentTokens: 4000, backgroundTokens: 0 } },
+    }, context);
+    harness.resume();
+    const root = await harness.root(context, modelRef ? { agent: { model: modelRef, instructions: COACH_INSTRUCTIONS } } : undefined);
+    if (modelRef) await root.configure({ model: modelRef, instructions: COACH_INSTRUCTIONS }, context);
+    const imported = await importPiWriting({ harness, root, context, sessionsDir });
+    output(`Pi import: ${imported.imported} new entries (${imported.german} German, ${imported.uncertain} uncertain); ${imported.issues.length} source issues.`);
+    for (const issue of imported.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
+
+    rl = createInterface({ input, output: outputStream, terminal: Boolean(input.isTTY && outputStream.isTTY) });
+    output(showUsage());
+    for (;;) {
+      let line;
+      try {
+        line = await rl.question("de> ");
+      } catch (error) {
+        if (error.code === "ERR_USE_AFTER_CLOSE" || error.code === "ERR_STREAM_PREMATURE_CLOSE") break;
+        if (input.destroyed || input.readableEnded) break;
+        throw error;
+      }
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (!trimmed.startsWith("/")) {
+        await sendInput(root, context, trimmed, output);
+        continue;
+      }
+
+      const [command, ...args] = trimmed.slice(1).split(/\s+/);
+      if (command === "exit" || command === "quit") break;
+      if (command === "help") {
+        output(showUsage());
+      } else if (command === "sync") {
+        const [from, through] = args;
+        const importedNow = await importPiWriting({ harness, root, context, sessionsDir, from, through: through ?? from });
+        output(`Imported ${importedNow.imported} new entries (${importedNow.german} German, ${importedNow.uncertain} uncertain); ${importedNow.issues.length} source issues.`);
+        for (const issue of importedNow.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
+      } else if (command === "review" || command === "progress") {
+        const range = command === "progress" ? {} : parseReviewRange(args);
+        const refreshed = await importPiWriting({ harness, root, context, sessionsDir, from: range.from, through: range.through });
+        if (refreshed.imported || refreshed.issues.length) {
+          output(`Pi import: ${refreshed.imported} new entries (${refreshed.german} German, ${refreshed.uncertain} uncertain); ${refreshed.issues.length} source issues.`);
+          for (const issue of refreshed.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
+        }
+        const entries = selectEntries(await getImportedWriting(harness, root, context), range.from, range.through);
+        if (!entries.length) {
+          output("No eligible German or uncertain Pi text found for that period.");
+          continue;
+        }
+        const prompt = command === "progress" ? buildProgressPrompt(entries) : buildReviewPrompt(entries, range);
+        await sendInput(root, context, prompt, output);
+      } else if (command === "list") {
+        const entries = await getImportedWriting(harness, root, context);
+        output(entries.map(({ sourceKey, localDate, classification, excluded }) => `${excluded ? "excluded" : classification}\t${localDate}\t${sourceKey}`).join("\n") || "No imported writing.");
+      } else if (command === "exclude") {
+        if (args.length !== 1 || !args[0].includes(":")) throw new Error("Use /exclude SESSION_ID:ENTRY_ID");
+        const entries = await getImportedWriting(harness, root, context);
+        const entry = entries.find((item) => item.sourceKey === args[0]);
+        if (!entry) throw new Error(`No imported entry found for ${args[0]}`);
+        await excludeImportedEntry({ harness, root, context, sourceKey: args[0] });
+        output(`Excluded ${args[0]} from future reviews. Earlier copies may remain in append-only Durable history.`);
+      } else if (command === "export") {
+        const entries = await getImportedWriting(harness, root, context);
+        output(await exportWriting(entries, args[0]));
+      } else if (command === "reset") {
+        resetRequested = await requestFullReset(rl, output, confirmReset);
+        if (resetRequested) break;
+      } else {
+        throw new Error(`Unknown command: /${command}; use /help`);
+      }
+    }
+  } finally {
+    rl?.close();
+    try {
+      if (harness) await harness.close(context);
+      else if (storage) await storage.close(context);
+      if (resetRequested) await eraseDatabaseFiles(databasePath);
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  if (resetRequested) {
+    await rmdir(dataDir);
+    output("All German coach data was deleted. Regular Pi source session files were left unchanged.");
+  }
+}
+
+async function main() {
+  const arg = process.argv[2];
+  if (arg === "--help" || arg === "-h") {
+    process.stdout.write(`${showUsage()}\n\nModel config: LLAMA_CPP_BASE_URL (loopback only), GERMAN_COACH_MODEL_ID.\n`);
+    return;
+  }
+  process.umask(0o077);
+  await runCoach();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    process.stderr.write(`German coach failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

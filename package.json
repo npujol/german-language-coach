@@ -1,0 +1,22 @@
+{
+  "name": "pi-german-coach",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "german-coach": "./src/coach.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
+    "franc-min": "6.2.0",
+    "proper-lockfile": "4.1.2"
+  }
+}
