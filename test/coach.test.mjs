@@ -58,16 +58,19 @@ test("SQLite data directory is exclusively locked to one Durable process", async
 
 test("local-only fetch blocks remote requests and redirects", async () => {
   let fetchCalls = 0;
+  let requestPayload;
   const fetch = localOnlyFetch("http://127.0.0.1:8091/v1", async (_input, init) => {
     fetchCalls++;
     assert.equal(init.redirect, "manual");
+    requestPayload = JSON.parse(init.body);
     return new Response(null, { status: 302, headers: { location: "https://example.com" } });
   });
   await assert.rejects(fetch("https://example.com/v1/chat/completions"), /configured local completion endpoint/);
   await assert.rejects(fetch("http://127.0.0.1:8092/v1/chat/completions"), /configured local completion endpoint/);
   await assert.rejects(fetch("http://127.0.0.1:8091/v1/models"), /configured local completion endpoint/);
   assert.equal(fetchCalls, 0);
-  await assert.rejects(fetch("http://127.0.0.1:8091/v1/chat/completions"), /may not redirect/);
+  await assert.rejects(fetch("http://127.0.0.1:8091/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "fixture" }) }), /may not redirect/);
+  assert.equal(requestPayload.chat_template_kwargs.enable_thinking, false);
   assert.equal(fetchCalls, 1);
 });
 
@@ -204,7 +207,7 @@ test("interactive review sends text only to the configured loopback model", asyn
     if (request.method === "GET" && request.url === "/v1/models") {
       modelListRequests++;
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ data: [{ id: "local-fixture" }] }));
+      response.end(JSON.stringify({ data: [{ id: "local-fixture", meta: { n_ctx: 65536, max_tokens: 8192 } }] }));
       return;
     }
     let body = "";
@@ -241,6 +244,8 @@ test("interactive review sends text only to the configured loopback model", asyn
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "/v1/chat/completions");
   assert.equal(requests[0].body.model, "local-fixture");
+  assert.equal(requests[0].body.chat_template_kwargs.enable_thinking, false);
+  assert.equal(requests[0].body.max_tokens ?? requests[0].body.max_completion_tokens, 8192);
   assert.ok(JSON.stringify(requests[0].body.messages).includes(learnerText));
   assert.ok(output.join("").includes("Dein Satz ist natürlich formuliert."));
 });

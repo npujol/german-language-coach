@@ -61,7 +61,16 @@ export function localOnlyFetch(baseUrl, nativeFetch = globalThis.fetch.bind(glob
   const endpoint = new URL(validateLocalBaseUrl(baseUrl));
   return async (input, init = {}) => {
     assertLocalRequestUrl(input, endpoint);
-    const response = await nativeFetch(input, { ...init, redirect: "manual" });
+    if (typeof init.body !== "string") throw new Error("Expected a JSON model request body");
+    let payload;
+    try {
+      payload = JSON.parse(init.body);
+    } catch (error) {
+      throw new Error(`Could not parse local model request body: ${error.message}`, { cause: error });
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Local model request body must be a JSON object");
+    payload.chat_template_kwargs = { ...(payload.chat_template_kwargs ?? {}), enable_thinking: false };
+    const response = await nativeFetch(input, { ...init, body: JSON.stringify(payload), redirect: "manual" });
     if (response.status >= 300 && response.status < 400) {
       throw new Error(`Blocked model endpoint redirect (HTTP ${response.status}); local-only requests may not redirect`);
     }
@@ -69,9 +78,7 @@ export function localOnlyFetch(baseUrl, nativeFetch = globalThis.fetch.bind(glob
   };
 }
 
-async function resolveLocalModelId(endpoint, configuredModelId) {
-  if (typeof configuredModelId === "string" && configuredModelId.trim()) return configuredModelId.trim();
-
+async function resolveLocalModel(endpoint, configuredModelId) {
   const url = new URL(`${endpoint}/models`);
   const headers = { Authorization: `Bearer ${process.env.LLAMA_CPP_API_KEY ?? "local"}` };
   const response = await globalThis.fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5000) });
@@ -83,27 +90,38 @@ async function resolveLocalModelId(endpoint, configuredModelId) {
   }
   const ids = [...new Set(payload.data.map((model) => model.id.trim()))];
   if (ids.length === 0) throw new Error("Local llama.cpp lists no models at /models");
-  if (ids.length > 1) throw new Error(`Local llama.cpp lists multiple models; set GERMAN_COACH_MODEL_ID to one of: ${ids.join(", ")}`);
-  return ids[0];
+  const selectedId = typeof configuredModelId === "string" && configuredModelId.trim()
+    ? configuredModelId.trim()
+    : ids.length === 1
+      ? ids[0]
+      : null;
+  if (!selectedId) throw new Error(`Local llama.cpp lists multiple models; set GERMAN_COACH_MODEL_ID to one of: ${ids.join(", ")}`);
+  const selected = payload.data.find((model) => model.id.trim() === selectedId);
+  if (!selected) throw new Error(`GERMAN_COACH_MODEL_ID ${selectedId} is not listed by the local llama.cpp server`);
+  return {
+    id: selectedId,
+    contextWindow: selected.meta?.n_ctx ?? selected.meta?.n_ctx_train ?? selected.context_length,
+    maxTokens: selected.meta?.max_tokens ?? selected.max_tokens,
+  };
 }
 
 export async function createLocalModels({ baseUrl = process.env.LLAMA_CPP_BASE_URL, modelId = process.env.GERMAN_COACH_MODEL_ID } = {}) {
   const endpoint = validateLocalBaseUrl(baseUrl);
-  const selectedModelId = await resolveLocalModelId(endpoint, modelId);
+  const selectedModel = await resolveLocalModel(endpoint, modelId);
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const api = openAICompletionsApi();
   const providerId = "llama-cpp-local";
   const model = {
-    id: selectedModelId,
-    name: selectedModelId,
+    id: selectedModel.id,
+    name: selectedModel.id,
     api: "openai-completions",
     provider: providerId,
     baseUrl: endpoint,
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: Number.parseInt(process.env.GERMAN_COACH_CONTEXT_WINDOW ?? "32768", 10),
-    maxTokens: Number.parseInt(process.env.GERMAN_COACH_MAX_TOKENS ?? "4096", 10),
+    contextWindow: Number.parseInt(String(process.env.GERMAN_COACH_CONTEXT_WINDOW ?? selectedModel.contextWindow ?? "32768"), 10),
+    maxTokens: Number.parseInt(String(process.env.GERMAN_COACH_MAX_TOKENS ?? selectedModel.maxTokens ?? "4096"), 10),
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
   };
   if (!Number.isSafeInteger(model.contextWindow) || model.contextWindow < 1024) throw new Error("GERMAN_COACH_CONTEXT_WINDOW must be an integer >= 1024");
