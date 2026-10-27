@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { scanPiSessions } from "./pi-session-import.mjs";
-import { buildProgressPrompt, buildReviewPrompt, COACH_INSTRUCTIONS } from "./prompt.mjs";
+import { buildProgressPrompt, buildReviewPrompt, chunkReviewEntries, COACH_INSTRUCTIONS } from "./prompt.mjs";
 
 export const DEFAULT_DATA_DIR = process.env.GERMAN_COACH_DATA_DIR ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pi-german-coach");
 export const DEFAULT_PI_SESSIONS_DIR = process.env.PI_SESSIONS_DIR ?? join(homedir(), ".pi", "agent", "sessions");
@@ -314,6 +314,7 @@ export async function runCoach({
   output = (message) => outputStream.write(`${message}\n`),
   context = BACKGROUND_CONTEXT,
   confirmReset,
+  reviewMaxChars = Number.parseInt(process.env.GERMAN_COACH_REVIEW_CHARS ?? "8000", 10),
 } = {}) {
   const databasePath = await ensurePrivateDataDirectory(dataDir);
   const localModel = injectedModels ? null : await createLocalModels({ baseUrl, modelId });
@@ -378,8 +379,16 @@ export async function runCoach({
           output("No eligible German or uncertain Pi text found for that period.");
           continue;
         }
-        const prompt = command === "progress" ? buildProgressPrompt(entries) : buildReviewPrompt(entries, range);
-        await sendInput(root, context, prompt, output);
+        const batches = chunkReviewEntries(entries, reviewMaxChars);
+        if (batches.length > 1) output(`Review split into ${batches.length} local batches to fit the model context.`);
+        for (let index = 0; index < batches.length; index++) {
+          const batch = { index: index + 1, total: batches.length };
+          const prompt = command === "progress"
+            ? buildProgressPrompt(batches[index], { batch })
+            : buildReviewPrompt(batches[index], { ...range, batch });
+          if (batches.length > 1) output(`Review batch ${batch.index}/${batch.total}`);
+          await sendInput(root, context, prompt, output);
+        }
       } else if (command === "list") {
         const entries = await getImportedWriting(harness, root, context);
         output(entries.map(({ sourceKey, localDate, classification, excluded }) => `${excluded ? "excluded" : classification}\t${localDate}\t${sourceKey}`).join("\n") || "No imported writing.");

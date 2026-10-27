@@ -14,7 +14,7 @@ Home Manager configurations can install `packages.${pkgs.system}.default` from t
 
 ## Start
 
-The local llama.cpp server must be running at `LLAMA_CPP_BASE_URL` (the Home Manager default is `http://127.0.0.1:8091/v1`). If its `/v1/models` endpoint lists one model, that model is selected. If it lists multiple, set `GERMAN_COACH_MODEL_ID` to one of those IDs. An optional `LLAMA_CPP_API_KEY` is sent only to this local endpoint.
+The local llama.cpp server must be running at `LLAMA_CPP_BASE_URL` (the Home Manager default is `http://127.0.0.1:8091/v1`). If its `/v1/models` endpoint lists one model, that model is selected. If it lists multiple, set `GERMAN_COACH_MODEL_ID` to one of those IDs. Reviews default to batches of 8,000 characters; adjust with `GERMAN_COACH_REVIEW_CHARS` if needed. An optional `LLAMA_CPP_API_KEY` is sent only to this local endpoint.
 
 ```sh
 german-coach
@@ -27,7 +27,7 @@ Only loopback endpoints (`127.0.0.1` or `[::1]`) are accepted. Coach requests us
 - `/sync [YYYY-MM-DD [YYYY-MM-DD]]` — import locally, without a model request.
 - `/review` or `/review live` — review today's local-date entries.
 - `/review YYYY-MM-DD [YYYY-MM-DD]` — review a date or date range.
-- `/review all` — review all imported, non-excluded entries.
+- `/review all` — review all imported, non-excluded entries; large reviews are split into local batches.
 - `/progress` — ask the local model for a learning-progress summary.
 - `/list` — list imported source IDs, dates, and classifications.
 - `/exclude SESSION_ID:ENTRY_ID` — omit an entry from future reviews. Earlier copies may remain in append-only Durable history.
