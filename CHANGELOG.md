@@ -1,3 +1,7 @@
+# Changelog
+
+All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
+
 # 1.0.0 (2026-10-28)
 
 
@@ -14,8 +18,4 @@
 
 * **german-coach:** add durable Pi writing coach ([385947c](https://github.com/npujol/german-language-coach/commit/385947ced4e088077fc53df629f7cd65d3b51a08))
 * **german-coach:** default to local Qwen2.5 instructor ([b3ce7de](https://github.com/npujol/german-language-coach/commit/b3ce7de79243b830a62d97a0473bb1355d795c5a))
-* **prompt:** add IPA transcription for difficult German words ([e5e596e](https://github.com/npujol/german-language-coach/commit/e5e596ee919487a0e76738b5f0213980b303d658))
-
-# Changelog
-
-All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
+* **prompt:** add IPA transcription for difficult German words ([e5e596e](https://github.com/npujol/german-language-coach/commit/e5e596ee19487a0e76738b5f021398b303d658))

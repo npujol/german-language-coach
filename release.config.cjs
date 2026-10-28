@@ -23,6 +23,7 @@ module.exports = {
         message: "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}",
       },
     ],
+    "@semantic-release/github",
   ],
   repositoryUrl: process.env.GIT_URL || "https://github.com/npujol/german-language-coach",
 };
