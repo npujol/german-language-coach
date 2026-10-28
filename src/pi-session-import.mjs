@@ -4,8 +4,79 @@ import { homedir } from "node:os";
 import { francAll } from "franc-min";
 
 export const DEFAULT_PI_SESSIONS_DIR = join(homedir(), ".pi", "agent", "sessions");
-const MIN_CONFIDENT_GERMAN_LENGTH = 40;
+const MIN_CONFIDENT_GERMAN_LENGTH = 10;
 const MAX_CLASSIFICATION_SAMPLE = 4000;
+const GERMAN_CONFIDENCE_THRESHOLD = 0.6;
+const SHORT_TEXT_MAX_LENGTH = 40;
+
+const GERMAN_MARKERS = [
+  /\bbitte\b/i,
+  /\bhilf(\s+mir)?\b/i,
+  /\bmir\b/i,
+  /\bbin\b/i,
+  /\bnicht\b/i,
+  /\bnoch\b/i,
+  /\bauch\b/i,
+  /\bgut(\b|$)/i,
+  /\bhabe\b/i,
+  /\bkeine\b/i,
+  /\bzeit\b/i,
+  /\beinmal\b/i,
+  /\bimmer\b/i,
+  /\bimmerhin\b/i,
+  /\bvielleicht\b/i,
+  /\bwahrscheinlich\b/i,
+  /\btrotzdem\b/i,
+  /\bdeshalb\b/i,
+  /\bdann\b/i,
+  /\bdoch\b/i,
+  /\berst\b/i,
+  /\bschon\b/i,
+  /\baber\b/i,
+  /\boder\b/i,
+  /\bund\b/i,
+  /\bdass\b/i,
+  /\bweil\b/i,
+  /\bdamit\b/i,
+  /\bdamit\b/i,
+  /\bjetzt\b/i,
+  /\bgleich\b/i,
+  /\bgerade\b/i,
+  /\bheute\b/i,
+  /\bmorgen\b/i,
+  /\ngestern\b/i,
+  /\blaut\b/i,
+  /\bso\b/i,
+  /\bsehr\b/i,
+  /\bviel\b/i,
+  /\bweder\b/i,
+  /\bnoch\b/i,
+  /\bsowie\b/i,
+  /\bsobald\b/i,
+  /\bsolange\b/i,
+  /\bsobald\b/i,
+];
+
+const GERMAN_SPECIAL_CHARS = /[äöüß]/;
+
+function countGermanMarkers(text) {
+  let score = 0;
+  for (const marker of GERMAN_MARKERS) {
+    if (marker.test(text)) score++;
+  }
+  if (GERMAN_SPECIAL_CHARS.test(text)) score += 3;
+  return score;
+}
+
+function boostShortTextGermanConfidence(francScore, text) {
+  if (francScore >= 0.8) return francScore;
+  if (text.length > SHORT_TEXT_MAX_LENGTH) return francScore;
+
+  const markers = countGermanMarkers(text);
+  if (markers >= 2) return Math.max(francScore, 0.85);
+  if (markers >= 1) return Math.max(francScore, 0.75);
+  return francScore;
+}
 
 function localDate(timestamp) {
   const date = new Date(timestamp);
@@ -16,19 +87,17 @@ function localDate(timestamp) {
   return `${year}-${month}-${day}`;
 }
 
-export function classifyGermanText(text) {
+export function germanConfidenceScore(text) {
   const sample = text.trim();
-  if (!sample) return "other";
-  if (sample.length < MIN_CONFIDENT_GERMAN_LENGTH) return "uncertain";
+  if (!sample) return 0;
+  if (sample.length < MIN_CONFIDENT_GERMAN_LENGTH) return 0;
 
   const rankings = francAll(sample.slice(0, MAX_CLASSIFICATION_SAMPLE), { minLength: 10 });
-  if (!rankings.length || rankings[0][0] === "und") return "uncertain";
+  if (!rankings.length || rankings[0][0] === "und") return 0;
 
-  const germanIndex = rankings.findIndex(([language]) => language === "deu");
-  if (rankings[0][0] === "deu") return "german";
-  if (germanIndex >= 0 && germanIndex < 3) return "uncertain";
-  if (sample.length > MAX_CLASSIFICATION_SAMPLE) return "uncertain";
-  return "other";
+  const germanRanking = rankings.find(([language]) => language === "deu");
+  if (!germanRanking) return 0;
+  return boostShortTextGermanConfidence(germanRanking[1], sample);
 }
 
 const SKILL_TAG_RE = /<skill\s/i;
@@ -141,8 +210,8 @@ export async function scanPiSessions({ root = DEFAULT_PI_SESSIONS_DIR, from, thr
       }
       seenSources.set(sourceKey, text);
 
-      const classification = classifyGermanText(text);
-      if (classification === "other") continue;
+      const germanConfidence = germanConfidenceScore(text);
+      if (germanConfidence < GERMAN_CONFIDENCE_THRESHOLD) continue;
       messages.push({
         sourceKey,
         sessionId,
@@ -151,7 +220,7 @@ export async function scanPiSessions({ root = DEFAULT_PI_SESSIONS_DIR, from, thr
         localDate: date,
         filePath,
         text,
-        classification,
+        germanConfidence,
       });
     }
   }

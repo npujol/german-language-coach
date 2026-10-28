@@ -195,8 +195,8 @@ export async function importPiWriting({ harness, root, context, sessionsDir = DE
 
   return {
     imported: additions.length,
-    german: additions.filter((entry) => entry.classification === "german").length,
-    uncertain: additions.filter((entry) => entry.classification === "uncertain").length,
+    aboveThreshold: additions.filter((entry) => entry.germanConfidence >= 0.9).length,
+    nearThreshold: additions.filter((entry) => entry.germanConfidence >= 0.6 && entry.germanConfidence < 0.9).length,
     issues: scanned.issues,
   };
 }
@@ -288,7 +288,7 @@ function showUsage() {
     "  /sync [FROM [THROUGH]]  import Pi user writing locally; no model request",
     "  /review [live|today|all|DATE [THROUGH]]",
     "  /progress               ask the local model for a learning summary",
-    "  /list                   show imported entry IDs, date, and classification",
+    "  /list                   show imported entry IDs, date, and confidence score",
     "  /exclude SESSION:ENTRY  omit an entry from future reviews (not physical deletion)",
     "  /export [FILE]          export local writing and source metadata",
     "  /reset                  erase the complete coach database after confirmation",
@@ -364,7 +364,7 @@ export async function runCoach({
     const clearedContextChars = await resetOversizedCoachContext(root, context);
     if (clearedContextChars) output(`Cleared ${clearedContextChars} characters of oversized active coach history; durable records and imported writing remain stored.`);
     const imported = await importPiWriting({ harness, root, context, sessionsDir });
-    output(`Pi import: ${imported.imported} new entries (${imported.german} German, ${imported.uncertain} uncertain); ${imported.issues.length} source issues.`);
+    output(`Pi import: ${imported.imported} new entries (${imported.aboveThreshold} ≥90%, ${imported.nearThreshold} 60–89%); ${imported.issues.length} source issues.`);
     for (const issue of imported.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
 
     rl = createInterface({ input, output: outputStream, terminal: Boolean(input.isTTY && outputStream.isTTY) });
@@ -392,18 +392,18 @@ export async function runCoach({
       } else if (command === "sync") {
         const [from, through] = args;
         const importedNow = await importPiWriting({ harness, root, context, sessionsDir, from, through: through ?? from });
-        output(`Imported ${importedNow.imported} new entries (${importedNow.german} German, ${importedNow.uncertain} uncertain); ${importedNow.issues.length} source issues.`);
+        output(`Imported ${importedNow.imported} new entries (${importedNow.aboveThreshold} ≥90%, ${importedNow.nearThreshold} 60–89%); ${importedNow.issues.length} source issues.`);
         for (const issue of importedNow.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
       } else if (command === "review" || command === "progress") {
         const range = command === "progress" ? {} : parseReviewRange(args);
         const refreshed = await importPiWriting({ harness, root, context, sessionsDir, from: range.from, through: range.through });
         if (refreshed.imported || refreshed.issues.length) {
-          output(`Pi import: ${refreshed.imported} new entries (${refreshed.german} German, ${refreshed.uncertain} uncertain); ${refreshed.issues.length} source issues.`);
+          output(`Pi import: ${refreshed.imported} new entries (${refreshed.aboveThreshold} ≥90%, ${refreshed.nearThreshold} 60–89%); ${refreshed.issues.length} source issues.`);
           for (const issue of refreshed.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
         }
         const entries = selectEntries(await getImportedWriting(harness, root, context), range.from, range.through);
         if (!entries.length) {
-          output("No eligible German or uncertain Pi text found for that period.");
+          output("No eligible German Pi text found for that period.");
           continue;
         }
         const batches = chunkReviewEntries(entries, reviewMaxChars);
@@ -419,14 +419,14 @@ export async function runCoach({
         }
       } else if (command === "list") {
         const entries = await getImportedWriting(harness, root, context);
-        output(entries.map(({ sourceKey, localDate, classification, excluded }) => `${excluded ? "excluded" : classification}\t${localDate}\t${sourceKey}`).join("\n") || "No imported writing.");
+        output(entries.map(({ sourceKey, localDate, germanConfidence, excluded }) => `${excluded ? "excluded" : germanConfidence.toFixed(2)}\t${localDate}\t${sourceKey}`).join("\n") || "No imported writing.");
       } else if (command === "exclude") {
         if (args.length !== 1 || !args[0].includes(":")) throw new Error("Use /exclude SESSION_ID:ENTRY_ID");
         const entries = await getImportedWriting(harness, root, context);
         const entry = entries.find((item) => item.sourceKey === args[0]);
         if (!entry) throw new Error(`No imported entry found for ${args[0]}`);
         await excludeImportedEntry({ harness, root, context, sourceKey: args[0] });
-        output(`Excluded ${args[0]} from future reviews. Earlier copies may remain in append-only Durable history.`);
+        output(`Excluded ${args[0]} (confidence ${entry.germanConfidence.toFixed(2)}) from future reviews. Earlier copies may remain in append-only Durable history.`);
       } else if (command === "export") {
         const entries = await getImportedWriting(harness, root, context);
         output(await exportWriting(entries, args[0]));

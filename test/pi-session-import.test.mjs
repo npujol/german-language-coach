@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { classifyGermanText, isExtensionMessage, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
+import { germanConfidenceScore, isExtensionMessage, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -27,15 +27,21 @@ function line(value) {
   return JSON.stringify(value);
 }
 
-test("classifies clear German, ambiguous short text, and confidently English text locally", () => {
-  assert.equal(classifyGermanText("Ich lerne gerade Deutsch und möchte meine Texte jeden Tag verbessern."), "german");
-  assert.equal(classifyGermanText("Ich habe ein Problem in Produktion"), "uncertain");
-  assert.equal(classifyGermanText("Das ist gut."), "uncertain");
-  assert.equal(classifyGermanText("Please help me debug this issue in production today."), "other");
-  assert.equal(classifyGermanText("  "), "other");
+test("returns a 0-1 confidence score for German, 0 for non-German", () => {
+  const highScore = germanConfidenceScore("Ich lerne gerade Deutsch und möchte meine Texte jeden Tag verbessern.");
+  assert.ok(highScore > 0.95, `Expected high German confidence, got ${highScore}`);
+  assert.ok(germanConfidenceScore("Please help me debug this issue in production today.") < 0.8, "Expected below threshold for English");
+  assert.equal(germanConfidenceScore("  "), 0);
+  assert.equal(germanConfidenceScore(""), 0);
 });
 
-test("imports only user-authored German and uncertain text, with stable provenance", async () => {
+test("scores German even when another language ranks higher on short text", () => {
+  assert.ok(germanConfidenceScore("Ich habe ein Problem in Produktion") >= 0.9);
+  assert.ok(germanConfidenceScore("Guten Morgen") >= 0.8);
+  assert.ok(germanConfidenceScore("Das ist gut") >= 0.8);
+});
+
+test("imports only user-authored German text with confidence >= 0.8, with stable provenance", async () => {
   const root = await fixtureRoot();
   const projectDir = join(root, "--repo--");
   await mkdir(projectDir);
@@ -56,9 +62,9 @@ test("imports only user-authored German and uncertain text, with stable provenan
   const { messages, issues } = await scanPiSessions({ root });
 
   assert.deepEqual(issues, []);
-  assert.deepEqual(messages.map(({ entryId, classification }) => [entryId, classification]), [
-    ["german-1", "german"],
-    ["short-1", "uncertain"],
+  assert.deepEqual(messages.map(({ entryId, germanConfidence }) => [entryId, germanConfidence]), [
+    ["german-1", germanConfidenceScore(german)],
+    ["short-1", germanConfidenceScore(shortGerman)],
   ]);
   assert.equal(messages[0].text, german);
   assert.equal(messages[0].sessionId, "session-a");
@@ -79,7 +85,7 @@ test("scans nested sessions and filters by local message date", async () => {
   await writeFile(join(nested, "session.jsonl"), session);
 
   const { messages } = await scanPiSessions({ root, from: "2026-10-21", through: "2026-10-21" });
-  assert.deepEqual(messages.map(({ entryId, localDate }) => [entryId, localDate]), [["day-2", "2026-10-21"]]);
+  assert.deepEqual(messages.map(({ entryId, localDate, germanConfidence }) => [entryId, localDate, germanConfidence]), [["day-2", "2026-10-21", germanConfidenceScore("Ich lerne gerade Deutsch und schreibe morgen eine längere Nachricht.")]]);
   await assert.rejects(scanPiSessions({ root, from: "2026-10-22", through: "2026-10-21" }), /from must not be after through/);
   await assert.rejects(scanPiSessions({ root, from: "2026-02-30" }), /valid YYYY-MM-DD date/);
 });
@@ -100,6 +106,7 @@ test("deduplicates repeated source entries and reports malformed or truncated JS
   const { messages, issues } = await scanPiSessions({ root });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].sourceKey, "session-dup:same-entry");
+  assert.equal(messages[0].germanConfidence, germanConfidenceScore(german));
   assert.deepEqual(issues.map(({ line: lineNumber }) => lineNumber), [4, 5]);
   assert.ok(issues.every(({ filePath: issuePath }) => issuePath === filePath));
 });
@@ -111,6 +118,23 @@ test("reports missing source identity rather than guessing it", async () => {
   assert.deepEqual(messages, []);
   assert.match(issues[0].message, /no preceding session id/);
   assert.throws(() => sourceEntryKey("session", ""), /entryId is required/);
+});
+
+test("excludes entries below the German confidence threshold", async () => {
+  const root = await fixtureRoot();
+  const highConf = "Ich lerne gerade Deutsch und möchte meine Texte jeden Tag verbessern.";
+  const lowConf = "Please help me debug this issue in production today.";
+  const filePath = join(root, "session.jsonl");
+  await writeFile(filePath, [
+    line({ type: "session", id: "session-conf" }),
+    line(message("high-1", localNoon("2026-10-20"), "user", highConf)),
+    line(message("low-1", localNoon("2026-10-20"), "user", lowConf)),
+  ].join("\n"));
+
+  const { messages } = await scanPiSessions({ root });
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].entryId, "high-1");
+  assert.ok(messages[0].germanConfidence >= 0.8);
 });
 
 test("fails clearly when the configured Pi session directory is unavailable", async () => {
@@ -131,6 +155,7 @@ test("skips user messages that are extension/skill injections", async () => {
   const { messages } = await scanPiSessions({ root });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].entryId, "real-1");
+  assert.equal(messages[0].germanConfidence, germanConfidenceScore(realUserText));
 });
 
 test("isExtensionMessage detects skill tags", () => {

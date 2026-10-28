@@ -105,7 +105,7 @@ test("imports source messages into Durable state without generating model respon
     outputStream: { write: (text) => output.push(text), isTTY: false },
     output: (text) => output.push(`${text}\n`),
   });
-  assert.ok(output.join("").includes("2 new entries (1 German, 1 uncertain)"));
+  assert.ok(output.join("").includes("2 new entries (2 ≥90%, 0 60–89%)"));
   assert.ok(output.join("").includes("German coach commands:"));
   assert.equal(await readFile(sessionFile, "utf8"), transcript);
 });
@@ -133,6 +133,7 @@ test("imports are idempotent, date-filtered, and source entries can be excluded 
     const entries = await getImportedWriting(harness, root, BACKGROUND_CONTEXT);
     assert.equal(entries.length, 1);
     assert.equal(entries[0].entryId, "entry-2");
+    assert.ok(entries[0].germanConfidence >= 0.8);
     await excludeImportedEntry({ harness, root, context: BACKGROUND_CONTEXT, sourceKey: entries[0].sourceKey });
     assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0].excluded, true);
     await root.submit({
@@ -172,6 +173,7 @@ test("SQLite Durable state survives reopening", async () => {
     assert.equal(entries.length, 1);
     assert.equal(entries[0].text, text);
     assert.equal(entries[0].sourceKey, "session-persist:entry-persist");
+    assert.ok(entries[0].germanConfidence >= 0.8);
   } finally {
     await reopened.close(BACKGROUND_CONTEXT);
   }
