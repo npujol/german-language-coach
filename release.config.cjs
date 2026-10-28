@@ -4,13 +4,7 @@ module.exports = {
   plugins: [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    [
-      "@semantic-release/changelog",
-      {
-        changelogFile: "CHANGELOG.md",
-        changelogTitle: "",
-      },
-    ],
+    "@semantic-release/changelog",
     [
       "@semantic-release/exec",
       {
