@@ -34,4 +34,5 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GIT_URL: https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/npujol/german-language-coach.git
         run: npx semantic-release

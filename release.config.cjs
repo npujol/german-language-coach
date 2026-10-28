@@ -24,5 +24,5 @@ module.exports = {
       },
     ],
   ],
-  repositoryUrl: "https://github.com/npujol/german-language-coach",
+  repositoryUrl: process.env.GIT_URL || "https://github.com/npujol/german-language-coach",
 };
