@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { classifyGermanText, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
+import { classifyGermanText, isExtensionMessage, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -115,4 +115,27 @@ test("reports missing source identity rather than guessing it", async () => {
 
 test("fails clearly when the configured Pi session directory is unavailable", async () => {
   await assert.rejects(scanPiSessions({ root: join(tmpdir(), "does-not-exist-pi-session-root") }), /ENOENT/);
+});
+
+test("skips user messages that are extension/skill injections", async () => {
+  const root = await fixtureRoot();
+  const skillText = '<skill name="openspec-apply-change" location="/foo/.pi/skill/SKILL.md">Implement tasks.</skill>\n\nBitte mach das.';
+  const realUserText = "Ich lerne gerade Deutsch und möchte meine Texte jeden Tag verbessern.";
+  const filePath = join(root, "session.jsonl");
+  await writeFile(filePath, [
+    line({ type: "session", id: "session-ext" }),
+    line(message("skill-1", localNoon("2026-10-20"), "user", skillText)),
+    line(message("real-1", localNoon("2026-10-20"), "user", realUserText)),
+  ].join("\n"));
+
+  const { messages } = await scanPiSessions({ root });
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].entryId, "real-1");
+});
+
+test("isExtensionMessage detects skill tags", () => {
+  assert.ok(isExtensionMessage("<skill name=\"foo\">bar</skill>"));
+  assert.ok(isExtensionMessage("<Skill name=\"foo\">bar</Skill>"));
+  assert.ok(!isExtensionMessage("Ich lerne Deutsch."));
+  assert.ok(!isExtensionMessage(""));
 });

@@ -31,6 +31,8 @@ export function classifyGermanText(text) {
   return "other";
 }
 
+const SKILL_TAG_RE = /<skill\s/i;
+
 export function extractUserText(content) {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
@@ -39,6 +41,10 @@ export function extractUserText(content) {
     .map((block) => block.text)
     .join("\n")
     .trim();
+}
+
+export function isExtensionMessage(text) {
+  return SKILL_TAG_RE.test(text);
 }
 
 export function sourceEntryKey(sessionId, entryId) {
@@ -109,7 +115,7 @@ export async function scanPiSessions({ root = DEFAULT_PI_SESSIONS_DIR, from, thr
 
       if (entry.type !== "message" || entry.message?.role !== "user") continue;
       const text = extractUserText(entry.message.content);
-      if (!text) continue;
+      if (!text || isExtensionMessage(text)) continue;
       if (!sessionId) {
         issues.push({ filePath, line: index + 1, message: "user message has no preceding session id" });
         continue;
