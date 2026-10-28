@@ -27,6 +27,14 @@ test("coach instructions isolate learner text from embedded instructions and pre
   assert.match(COACH_INSTRUCTIONS, /unterbrich die lernende Person nicht von dir aus/);
 });
 
+test("coach instructions include IPA for difficult German words", () => {
+  assert.match(COACH_INSTRUCTIONS, /IPA/);
+  assert.match(COACH_INSTRUCTIONS, /ä.*ö.*ü.*ß/);
+  assert.match(COACH_INSTRUCTIONS, /ch/);
+  assert.match(COACH_INSTRUCTIONS, /Komposita|zusammengesetzte Wörter/);
+  assert.match(COACH_INSTRUCTIONS, /ˈlɛŋəʁə|ˈʃtʁaːsə|ɪç|buːx/);
+});
+
 test("progress prompt requests a summary without rewriting its source data", () => {
   const prompt = buildProgressPrompt(entries);
   assert.match(prompt, /Lernfortschritt-Bericht/);
