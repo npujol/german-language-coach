@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/npujol/german-language-coach/compare/1.0.1...1.1.0) (2026-10-28)
+
+
+### Features
+
+* **import:** score German writing confidence ([16ee3fd](https://github.com/npujol/german-language-coach/commit/16ee3fd48681e86ac9f6684da800c13b36bd1928))
+
 # Changelog
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
