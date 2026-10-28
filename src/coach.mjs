@@ -16,6 +16,8 @@ import { buildProgressPrompt, buildReviewPrompt, chunkReviewEntries, COACH_INSTR
 
 export const DEFAULT_DATA_DIR = process.env.GERMAN_COACH_DATA_DIR ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pi-german-coach");
 export const DEFAULT_PI_SESSIONS_DIR = process.env.PI_SESSIONS_DIR ?? join(homedir(), ".pi", "agent", "sessions");
+export const DEFAULT_MODEL_BASE_URL = "http://127.0.0.1:8094/v1";
+export const DEFAULT_MODEL_ID = "qwen2.5-1.5b-instruct";
 export const DATA_FILE_NAME = "coach.sqlite";
 
 const ImportedWriting = defineDoc({
@@ -105,7 +107,7 @@ async function resolveLocalModel(endpoint, configuredModelId) {
   };
 }
 
-export async function createLocalModels({ baseUrl = process.env.LLAMA_CPP_BASE_URL, modelId = process.env.GERMAN_COACH_MODEL_ID } = {}) {
+export async function createLocalModels({ baseUrl = process.env.GERMAN_COACH_BASE_URL ?? process.env.LLAMA_CPP_BASE_URL ?? DEFAULT_MODEL_BASE_URL, modelId = process.env.GERMAN_COACH_MODEL_ID ?? DEFAULT_MODEL_ID } = {}) {
   const endpoint = validateLocalBaseUrl(baseUrl);
   const selectedModel = await resolveLocalModel(endpoint, modelId);
   const nativeFetch = globalThis.fetch.bind(globalThis);
@@ -305,8 +307,8 @@ async function eraseDatabaseFiles(databasePath) {
 export async function runCoach({
   dataDir = DEFAULT_DATA_DIR,
   sessionsDir = DEFAULT_PI_SESSIONS_DIR,
-  modelId = process.env.GERMAN_COACH_MODEL_ID,
-  baseUrl = process.env.LLAMA_CPP_BASE_URL,
+  modelId = process.env.GERMAN_COACH_MODEL_ID ?? DEFAULT_MODEL_ID,
+  baseUrl = process.env.GERMAN_COACH_BASE_URL ?? process.env.LLAMA_CPP_BASE_URL ?? DEFAULT_MODEL_BASE_URL,
   models: injectedModels,
   storage: injectedStorage,
   input = process.stdin,

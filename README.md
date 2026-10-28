@@ -14,7 +14,7 @@ Home Manager configurations can install `packages.${pkgs.system}.default` from t
 
 ## Start
 
-The local llama.cpp server must be running at `LLAMA_CPP_BASE_URL` (the Home Manager default is `http://127.0.0.1:8091/v1`). If its `/v1/models` endpoint lists one model, that model is selected. If it lists multiple, set `GERMAN_COACH_MODEL_ID` to one of those IDs. Reviews default to batches of 8,000 characters; adjust with `GERMAN_COACH_REVIEW_CHARS` if needed. An optional `LLAMA_CPP_API_KEY` is sent only to this local endpoint.
+The Home Manager integration uses Qwen2.5 1.5B Instruct at `http://127.0.0.1:8094/v1`, separate from regular Pi's llama.cpp endpoint. Start it in the background with `qwen25-instructor`; its log is `~/Library/Logs/qwen25-instructor.log`. The coach defaults to model ID `qwen2.5-1.5b-instruct`. Override with `GERMAN_COACH_BASE_URL` and `GERMAN_COACH_MODEL_ID` if needed. Direct installs fall back to `LLAMA_CPP_BASE_URL` when set, otherwise the same coach-specific defaults. Reviews default to batches of 8,000 characters; adjust with `GERMAN_COACH_REVIEW_CHARS`. An optional `LLAMA_CPP_API_KEY` is sent only to the configured loopback endpoint.
 
 ```sh
 german-coach

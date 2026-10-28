@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { acquireCoachLock, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, runCoach, validateLocalBaseUrl } from "../src/coach.mjs";
+import { acquireCoachLock, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, runCoach, validateLocalBaseUrl } from "../src/coach.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -33,6 +33,11 @@ function today() {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
+
+test("local model defaults to the Qwen2.5 instructor endpoint and ID", () => {
+  assert.equal(DEFAULT_MODEL_BASE_URL, "http://127.0.0.1:8094/v1");
+  assert.equal(DEFAULT_MODEL_ID, "qwen2.5-1.5b-instruct");
+});
 
 test("local model URL rejects remote hosts and accepts loopback only", () => {
   assert.equal(validateLocalBaseUrl("http://127.0.0.1:8091/v1"), "http://127.0.0.1:8091/v1");
@@ -232,6 +237,7 @@ test("interactive review sends text only to the configured loopback model", asyn
       dataDir: join(rootDir, "state"),
       sessionsDir,
       baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      modelId: "local-fixture",
       input: Readable.from([`/review ${today()}\n`, "/exit\n"]),
       outputStream: { write: (text) => output.push(text), isTTY: false },
       output: (text) => output.push(`${text}\n`),
