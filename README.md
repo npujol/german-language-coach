@@ -39,7 +39,7 @@ Plain text entered in the coach is treated as a direct practice request. The coa
 
 ## Local data
 
-The default database is `$XDG_DATA_HOME/pi-german-coach/coach.sqlite`, or `~/.local/share/pi-german-coach/coach.sqlite` when `XDG_DATA_HOME` is unset. It contains imported writing, source references, and the Durable conversation. The app enforces a single process owner for the database.
+The default database is `$XDG_DATA_HOME/pi-german-coach/coach.sqlite`, or `~/.local/share/pi-german-coach/coach.sqlite` when `XDG_DATA_HOME` is unset. It contains imported writing, source references, and Durable conversations. Reviews use an isolated conversation per batch to keep model context bounded. Oversized interactive context is reset with a notice; stored Durable records remain. The app enforces a single process owner for the database.
 
 The first import reads all retained Pi session files below `PI_SESSIONS_DIR` (default `~/.pi/agent/sessions`). Low-confidence or short text is retained as `uncertain` and included in requested reviews. Local language detection can still miss or misclassify text; `/sync` reports malformed source lines.
 

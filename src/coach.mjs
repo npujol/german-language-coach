@@ -215,6 +215,29 @@ export async function excludeImportedEntry({ harness, root, context, sourceKey }
   }, context);
 }
 
+export function serializedContextSize(messages) {
+  return Buffer.byteLength(JSON.stringify(messages), "utf8");
+}
+
+export async function resetOversizedCoachContext(conversation, context, maxChars = Number.parseInt(process.env.GERMAN_COACH_CONTEXT_CHARS ?? "12000", 10)) {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1024) throw new RangeError("GERMAN_COACH_CONTEXT_CHARS must be an integer >= 1024");
+  const view = await conversation.context(context);
+  const size = serializedContextSize(view.messages);
+  if (size <= maxChars) return 0;
+  await conversation.reset(undefined, context);
+  return size;
+}
+
+export async function createReviewConversation(harness, context, modelRef) {
+  if (!modelRef || typeof modelRef.provider !== "string" || typeof modelRef.modelId !== "string") {
+    throw new TypeError("a configured local model is required for review conversations");
+  }
+  return harness.createConversation({
+    ownership: { kind: "ownerless" },
+    agent: { model: modelRef, instructions: COACH_INSTRUCTIONS },
+  }, context);
+}
+
 async function sendInput(root, context, content, output) {
   const submission = await root.submit({ type: "input", content }, context);
   const settled = await submission.wait(context);
@@ -338,6 +361,8 @@ export async function runCoach({
     harness.resume();
     const root = await harness.root(context, modelRef ? { agent: { model: modelRef, instructions: COACH_INSTRUCTIONS } } : undefined);
     if (modelRef) await root.configure({ model: modelRef, instructions: COACH_INSTRUCTIONS }, context);
+    const clearedContextChars = await resetOversizedCoachContext(root, context);
+    if (clearedContextChars) output(`Cleared ${clearedContextChars} characters of oversized active coach history; durable records and imported writing remain stored.`);
     const imported = await importPiWriting({ harness, root, context, sessionsDir });
     output(`Pi import: ${imported.imported} new entries (${imported.german} German, ${imported.uncertain} uncertain); ${imported.issues.length} source issues.`);
     for (const issue of imported.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
@@ -388,8 +413,9 @@ export async function runCoach({
           const prompt = command === "progress"
             ? buildProgressPrompt(batches[index], { batch })
             : buildReviewPrompt(batches[index], { ...range, batch });
+          const reviewConversation = await createReviewConversation(harness, context, modelRef);
           if (batches.length > 1) output(`Review batch ${batch.index}/${batch.total}`);
-          await sendInput(root, context, prompt, output);
+          await sendInput(reviewConversation, context, prompt, output);
         }
       } else if (command === "list") {
         const entries = await getImportedWriting(harness, root, context);

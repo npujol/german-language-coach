@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { acquireCoachLock, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, runCoach, validateLocalBaseUrl } from "../src/coach.mjs";
+import { acquireCoachLock, createReviewConversation, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, resetOversizedCoachContext, runCoach, validateLocalBaseUrl } from "../src/coach.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -135,6 +135,12 @@ test("imports are idempotent, date-filtered, and source entries can be excluded 
     assert.equal(entries[0].entryId, "entry-2");
     await excludeImportedEntry({ harness, root, context: BACKGROUND_CONTEXT, sourceKey: entries[0].sourceKey });
     assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0].excluded, true);
+    await root.submit({
+      type: "write",
+      entry: { kind: "app.test.large-context", model: [{ role: "user", content: "x".repeat(6000), timestamp: Date.now() }] },
+    }, BACKGROUND_CONTEXT);
+    assert.ok(await resetOversizedCoachContext(root, BACKGROUND_CONTEXT, 5000) > 5000);
+    assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0].sourceKey, entries[0].sourceKey);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
   }
