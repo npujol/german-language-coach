@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/npujol/german-language-coach/compare/1.0.0...1.0.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **semantic-release:** fix changelog header order and add github release plugin ([e515bd4](https://github.com/npujol/german-language-coach/commit/e515bd44f0b05d46cc670beafcb248022c66bcf3))
+
 # Changelog
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
