@@ -29,8 +29,12 @@ Only loopback endpoints (`127.0.0.1` or `[::1]`) are accepted. Coach requests us
 - `/review YYYY-MM-DD [YYYY-MM-DD]` — review a date or date range.
 - `/review all` — review all imported, non-excluded entries; large reviews are split into local batches.
 - `/progress` — ask the local model for a learning-progress summary.
-- `/list` — list imported source IDs, dates, and classifications.
-- `/exclude SESSION_ID:ENTRY_ID` — omit an entry from future reviews. Earlier copies may remain in append-only Durable history.
+- `/list` — list imported source IDs, dates, and classifications; `paste?N` marks entries with N suspicious paragraphs.
+- `/paste-candidates` — inspect paragraphs heuristically flagged as possible pasted blocks, including the signals that triggered the flag.
+- `/paste-keep SESSION_ID:ENTRY_ID:PARAGRAPH` — mark a flagged paragraph as authored; the choice survives sync.
+- `/paste-delete SESSION_ID:ENTRY_ID:PARAGRAPH` — omit a flagged paragraph from future reviews while preserving the original imported text.
+- `/delete SESSION_ID:ENTRY_ID` — confirm and remove an entry from active coach imports; a tombstone prevents re-import.
+- `/exclude SESSION_ID:ENTRY_ID` — omit an entry from future reviews without removing it from the active import list.
 - `/export [FILE]` — print a local export or create a new file without overwriting an existing file.
 - `/reset` — type `RESET` to erase the complete Durable coach database. Regular Pi transcripts are left unchanged.
 - `/exit` — close the coach.
@@ -41,7 +45,7 @@ Plain text entered in the coach is treated as a direct practice request. The coa
 
 The default database is `$XDG_DATA_HOME/pi-german-coach/coach.sqlite`, or `~/.local/share/pi-german-coach/coach.sqlite` when `XDG_DATA_HOME` is unset. It contains imported writing, source references, and Durable conversations. Reviews use an isolated conversation per batch to keep model context bounded. Oversized interactive context is reset with a notice; stored Durable records remain. The app enforces a single process owner for the database.
 
-The first import reads all retained Pi session files below `PI_SESSIONS_DIR` (default `~/.pi/agent/sessions`). Low-confidence or short text is retained as `uncertain` and included in requested reviews. Local language detection can still miss or misclassify text; `/sync` reports malformed source lines.
+The first import reads all retained Pi session files below `PI_SESSIONS_DIR` (default `~/.pi/agent/sessions`). Low-confidence or short text is retained as `uncertain` and included in requested reviews. Paragraphs that look potentially pasted (long blocks, structured formatting, multiple links, or a strong language shift) are attached as `pasteCandidates`, surfaced by `/sync`, `/list`, and `/paste-candidates`, and passed to the coach as uncertain authorship. Heuristics never remove text on their own. `/paste-delete` only omits a paragraph from future reviews; the original Pi transcript and imported source text stay unchanged. `/delete` removes an entry from the active coach document and tombstones its source key, but Durable history may retain prior snapshots. Local language detection can miss or misclassify text; `/sync` reports malformed source lines.
 
 ## Development
 

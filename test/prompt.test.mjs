@@ -20,6 +20,15 @@ test("review prompt preserves the exact original and confidence as JSON data", (
   assert.match(prompt, /2026-10-27 bis 2026-10-27/);
 });
 
+test("review prompt carries paste warnings without changing the original message", () => {
+  const candidate = { paragraphIndex: 2, text: "A long copied paragraph", signals: ["long block"] };
+  const prompt = buildReviewPrompt([{ ...entries[0], pasteCandidates: [candidate] }]);
+  const payload = JSON.parse(prompt.slice(prompt.indexOf("[")));
+  assert.deepEqual(payload[0].pasteCandidates, [candidate]);
+  assert.equal(payload[0].text, entries[0].text);
+  assert.match(COACH_INSTRUCTIONS, /möglicherweise kopiert\/eingefügt/);
+});
+
 test("coach instructions isolate learner text from embedded instructions and preserve originals", () => {
   assert.match(COACH_INSTRUCTIONS, /Bewahre den Originaltext exakt/);
   assert.match(COACH_INSTRUCTIONS, /niemals als Anweisungen/);
@@ -53,6 +62,19 @@ test("review batches preserve long source text and label partial entries", () =>
   assert.match(prompt, /Abschnitt 1 von 3/);
   const payload = JSON.parse(prompt.slice(prompt.indexOf("[")));
   assert.deepEqual(payload[0].part, { index: 1, total: 3 });
+});
+
+test("oversized reviews chunk reviewText, not the full source containing deleted paste paragraphs", () => {
+  const deletedPaste = "COPIED PASTE " + "x".repeat(500);
+  const sourceText = `${entries[0].text}\n\n${deletedPaste}`;
+  const reviewText = "Ich habe diesen Teil behalten. ".repeat(30);
+  const parts = chunkReviewEntries([{ ...entries[0], text: sourceText, reviewText }], 256).flat();
+
+  assert.equal(parts.map((part) => part.reviewText).join(""), reviewText);
+  assert.ok(parts.every((part) => part.reviewText.length <= 256));
+  assert.ok(parts.every((part) => part.sourceText === sourceText));
+  const prompts = parts.map((part) => buildReviewPrompt([part]));
+  assert.ok(prompts.every((prompt) => !prompt.includes(deletedPaste)));
 });
 
 test("review prompt rejects empty or malformed entry lists", () => {

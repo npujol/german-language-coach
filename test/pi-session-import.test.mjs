@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { germanConfidenceScore, isExtensionMessage, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
+import { detectLikelyPastedBlocks, germanConfidenceScore, isExtensionMessage, scanPiSessions, sourceEntryKey } from "../src/pi-session-import.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -26,6 +26,18 @@ function message(id, timestamp, role, content) {
 function line(value) {
   return JSON.stringify(value);
 }
+
+test("flags likely pasted paragraphs conservatively without removing text", () => {
+  const authored = "Kannst du mir helfen, diesen Ausdruck im Kontext zu verstehen?";
+  const pasted = `Please review the following detailed implementation requirements and explain how they should be applied.\n${"This paragraph contains copied English source material that is much longer than the surrounding German question. ".repeat(8)}`;
+  const blocks = detectLikelyPastedBlocks(`${authored}\n\n${pasted}`, { messageGermanConfidence: 0.9 });
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].paragraphIndex, 2);
+  assert.match(blocks[0].text, /^Please review/);
+  assert.ok(blocks[0].signals.includes("long block"));
+
+  assert.deepEqual(detectLikelyPastedBlocks("Ich schreibe einen längeren deutschen Absatz ohne auffällige Formatierung."), []);
+});
 
 test("returns a 0-1 confidence score for German, 0 for non-German", () => {
   const highScore = germanConfidenceScore("Ich lerne gerade Deutsch und möchte meine Texte jeden Tag verbessern.");
@@ -70,6 +82,7 @@ test("imports only user-authored German text with confidence >= 0.8, with stable
   assert.equal(messages[0].sessionId, "session-a");
   assert.equal(messages[0].timestamp, localNoon("2026-10-20"));
   assert.equal(messages[0].sourceKey, "session-a:german-1");
+  assert.deepEqual(messages[0].pasteCandidates, []);
   assert.equal(await readFile(filePath, "utf8"), source, "scanner must not mutate source transcript");
 });
 

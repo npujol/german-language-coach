@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { francAll } from "franc-min";
 
 export const DEFAULT_PI_SESSIONS_DIR = join(homedir(), ".pi", "agent", "sessions");
@@ -8,6 +9,8 @@ const MIN_CONFIDENT_GERMAN_LENGTH = 10;
 const MAX_CLASSIFICATION_SAMPLE = 4000;
 const GERMAN_CONFIDENCE_THRESHOLD = 0.6;
 const SHORT_TEXT_MAX_LENGTH = 40;
+const PASTED_BLOCK_MIN_CHARS = 320;
+const PASTED_BLOCK_LONG_CHARS = 700;
 
 const GERMAN_MARKERS = [
   /\bbitte\b/i,
@@ -116,6 +119,38 @@ export function isExtensionMessage(text) {
   return SKILL_TAG_RE.test(text);
 }
 
+/**
+ * Flag paragraph-sized blocks that look more like pasted source material than
+ * conversational writing. This is review metadata only; it never drops text.
+ */
+export function detectLikelyPastedBlocks(text, { messageGermanConfidence = 0 } = {}) {
+  if (typeof text !== "string" || !text.trim()) return [];
+
+  return text
+    .split(/\n\s*\n/)
+    .map((block, index) => ({ block: block.trim(), paragraphIndex: index + 1 }))
+    .filter(({ block }) => block)
+    .flatMap(({ block, paragraphIndex }) => {
+      const lines = block.split("\n");
+      const signals = [];
+      if (block.length >= PASTED_BLOCK_LONG_CHARS) signals.push("long block");
+      if (block.length >= PASTED_BLOCK_MIN_CHARS && lines.length >= 4) signals.push("long multi-line block");
+      if (/```|^\s{0,3}(?:>|#{1,6}\s|[-*+]\s|\d+[.)]\s)/m.test(block)) signals.push("structured formatting");
+      if ((block.match(/https?:\/\//g) ?? []).length >= 2) signals.push("multiple links");
+      if (messageGermanConfidence >= GERMAN_CONFIDENCE_THRESHOLD && block.length >= 80 && germanConfidenceScore(block) < 0.35) {
+        signals.push("language differs from German message");
+      }
+
+      const hasStructure = signals.includes("structured formatting") || signals.includes("multiple links");
+      const likelyPasted = block.length >= PASTED_BLOCK_LONG_CHARS ||
+        (block.length >= PASTED_BLOCK_MIN_CHARS && lines.length >= 4) ||
+        (hasStructure && (lines.length >= 3 || block.length >= 120)) ||
+        signals.includes("language differs from German message");
+      const id = createHash("sha256").update(`${paragraphIndex}\0${block}`).digest("hex").slice(0, 16);
+      return likelyPasted ? [{ id, paragraphIndex, text: block, signals }] : [];
+    });
+}
+
 export function sourceEntryKey(sessionId, entryId) {
   if (typeof sessionId !== "string" || !sessionId.trim()) throw new TypeError("sessionId is required");
   if (typeof entryId !== "string" || !entryId.trim()) throw new TypeError("entryId is required");
@@ -212,6 +247,7 @@ export async function scanPiSessions({ root = DEFAULT_PI_SESSIONS_DIR, from, thr
 
       const germanConfidence = germanConfidenceScore(text);
       if (germanConfidence < GERMAN_CONFIDENCE_THRESHOLD) continue;
+      const pasteCandidates = detectLikelyPastedBlocks(text, { messageGermanConfidence: germanConfidence });
       messages.push({
         sourceKey,
         sessionId,
@@ -221,6 +257,7 @@ export async function scanPiSessions({ root = DEFAULT_PI_SESSIONS_DIR, from, thr
         filePath,
         text,
         germanConfidence,
+        pasteCandidates,
       });
     }
   }

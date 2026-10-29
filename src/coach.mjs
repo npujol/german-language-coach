@@ -26,7 +26,7 @@ const ImportedWriting = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({ entries: [] }),
+  initial: () => ({ entries: [], deletedSourceKeys: [] }),
   checkpointWhen: () => true,
 });
 
@@ -177,26 +177,65 @@ async function ensureImportedWriting(harness, root, context) {
   return await harness.snapshot(ImportedWriting, root.id, context);
 }
 
+function reviewTextFor(text, pasteCandidates = []) {
+  const deletedParagraphs = new Set(pasteCandidates
+    .filter((candidate) => candidate.disposition === "deleted")
+    .map((candidate) => candidate.paragraphIndex));
+  return text.split(/\n\s*\n/).filter((_, index) => !deletedParagraphs.has(index + 1)).join("\n\n").trim();
+}
+
 export async function importPiWriting({ harness, root, context, sessionsDir = DEFAULT_PI_SESSIONS_DIR, from, through }) {
   const scanned = await scanPiSessions({ root: sessionsDir, from, through });
   const snapshot = await ensureImportedWriting(harness, root, context);
-  const known = new Set(snapshot.entries.map((entry) => entry.sourceKey));
-  const additions = scanned.messages.filter((entry) => !known.has(entry.sourceKey));
+  const priorByKey = new Map(snapshot.entries.map((entry) => [entry.sourceKey, entry]));
+  const deletedSourceKeys = new Set(snapshot.deletedSourceKeys ?? []);
+  const additions = scanned.messages.filter((entry) => !priorByKey.has(entry.sourceKey) && !deletedSourceKeys.has(entry.sourceKey));
+  const refreshedByKey = new Map(scanned.messages.map((entry) => {
+    const prior = priorByKey.get(entry.sourceKey);
+    const dispositionById = new Map((prior?.pasteCandidates ?? []).map((candidate) => [candidate.id, candidate.disposition ?? "review"]));
+    const pasteCandidates = entry.pasteCandidates.map((candidate) => ({
+      ...candidate,
+      disposition: dispositionById.get(candidate.id) ?? "review",
+    }));
+    return [entry.sourceKey, { ...entry, pasteCandidates, reviewText: reviewTextFor(entry.text, pasteCandidates) }];
+  }));
+  const candidateUpdates = snapshot.entries.filter((entry) => {
+    const refreshed = refreshedByKey.get(entry.sourceKey);
+    return refreshed && (
+      JSON.stringify(entry.pasteCandidates ?? []) !== JSON.stringify(refreshed.pasteCandidates) ||
+      entry.reviewText !== refreshed.reviewText
+    );
+  });
 
-  if (additions.length) {
+  if (additions.length || candidateUpdates.length) {
     await root.commit(async (tx) => {
       const doc = await tx.doc(ImportedWriting, root.id);
+      doc.deletedSourceKeys ??= [];
       const committed = new Set(doc.entries.map((entry) => entry.sourceKey));
       for (const entry of additions) {
-        if (!committed.has(entry.sourceKey)) doc.entries.push({ ...entry, excluded: false });
+        const refreshed = refreshedByKey.get(entry.sourceKey);
+        if (!committed.has(entry.sourceKey) && !doc.deletedSourceKeys.includes(entry.sourceKey)) {
+          doc.entries.push({ ...refreshed, excluded: false });
+        }
+      }
+      for (const entry of doc.entries) {
+        const refreshed = refreshedByKey.get(entry.sourceKey);
+        if (refreshed) {
+          entry.pasteCandidates = refreshed.pasteCandidates;
+          entry.reviewText = refreshed.reviewText;
+        }
       }
     }, context);
   }
 
+  const flagged = [...refreshedByKey.values()].filter((entry) => entry.pasteCandidates.some((candidate) => candidate.disposition === "review"));
   return {
     imported: additions.length,
     aboveThreshold: additions.filter((entry) => entry.germanConfidence >= 0.9).length,
     nearThreshold: additions.filter((entry) => entry.germanConfidence >= 0.6 && entry.germanConfidence < 0.9).length,
+    flaggedPasteEntries: flagged.length,
+    flaggedPasteBlocks: flagged.reduce((total, entry) => total + entry.pasteCandidates.filter((candidate) => candidate.disposition === "review").length, 0),
+    candidateUpdates: candidateUpdates.length,
     issues: scanned.issues,
   };
 }
@@ -212,6 +251,30 @@ export async function excludeImportedEntry({ harness, root, context, sourceKey }
     const target = doc.entries.find((item) => item.sourceKey === sourceKey);
     if (!target) throw new Error(`No imported entry found for ${sourceKey}`);
     target.excluded = true;
+  }, context);
+}
+
+export async function deleteImportedEntry({ harness, root, context, sourceKey }) {
+  await root.commit(async (tx) => {
+    const doc = await tx.doc(ImportedWriting, root.id);
+    const index = doc.entries.findIndex((item) => item.sourceKey === sourceKey);
+    if (index < 0) throw new Error(`No imported entry found for ${sourceKey}`);
+    doc.entries.splice(index, 1);
+    doc.deletedSourceKeys ??= [];
+    if (!doc.deletedSourceKeys.includes(sourceKey)) doc.deletedSourceKeys.push(sourceKey);
+  }, context);
+}
+
+export async function setPasteCandidateDisposition({ harness, root, context, sourceKey, paragraphIndex, disposition }) {
+  if (!["authored", "deleted"].includes(disposition)) throw new TypeError("disposition must be authored or deleted");
+  await root.commit(async (tx) => {
+    const doc = await tx.doc(ImportedWriting, root.id);
+    const entry = doc.entries.find((item) => item.sourceKey === sourceKey);
+    if (!entry) throw new Error(`No imported entry found for ${sourceKey}`);
+    const candidate = (entry.pasteCandidates ?? []).find((item) => item.paragraphIndex === paragraphIndex);
+    if (!candidate) throw new Error(`No paste candidate for paragraph ${paragraphIndex} in ${sourceKey}`);
+    candidate.disposition = disposition;
+    entry.reviewText = reviewTextFor(entry.text, entry.pasteCandidates);
   }, context);
 }
 
@@ -257,7 +320,7 @@ function currentLocalDate() {
 }
 
 function selectEntries(entries, from, through) {
-  return entries.filter((entry) => !entry.excluded && (!from || entry.localDate >= from) && (!through || entry.localDate <= through));
+  return entries.filter((entry) => !entry.excluded && (entry.reviewText ?? entry.text).trim() && (!from || entry.localDate >= from) && (!through || entry.localDate <= through));
 }
 
 function isCalendarDate(value) {
@@ -288,8 +351,12 @@ function showUsage() {
     "  /sync [FROM [THROUGH]]  import Pi user writing locally; no model request",
     "  /review [live|today|all|DATE [THROUGH]]",
     "  /progress               ask the local model for a learning summary",
-    "  /list                   show imported entry IDs, date, and confidence score",
-    "  /exclude SESSION:ENTRY  omit an entry from future reviews (not physical deletion)",
+    "  /list                   show imported entry IDs, date, confidence, and paste flags",
+    "  /paste-candidates       inspect paragraphs heuristically flagged as possible pastes",
+    "  /exclude SESSION:ENTRY  omit an entry from future reviews (reversible by reset only)",
+    "  /delete SESSION:ENTRY   remove an entry and prevent it being re-imported",
+    "  /paste-keep SESSION:ENTRY:PARAGRAPH  mark a candidate as authored",
+    "  /paste-delete SESSION:ENTRY:PARAGRAPH  omit a candidate paragraph from reviews",
     "  /export [FILE]          export local writing and source metadata",
     "  /reset                  erase the complete coach database after confirmation",
     "  /help  /exit",
@@ -305,6 +372,16 @@ async function exportWriting(entries, path) {
   await writeFile(target, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
   await chmod(target, 0o600);
   return `Export written to ${target}`;
+}
+
+async function confirmEntryDeletion(rl, output, confirmDelete, sourceKey) {
+  const prompt = `Remove ${sourceKey} from active coach imports? The Pi transcript is unchanged. Type DELETE to confirm: `;
+  const answer = confirmDelete ? await confirmDelete(prompt) : await rl.question(prompt);
+  if (answer !== "DELETE") {
+    output("Entry deletion cancelled.");
+    return false;
+  }
+  return true;
 }
 
 async function requestFullReset(rl, output, confirmReset) {
@@ -339,6 +416,7 @@ export async function runCoach({
   output = (message) => outputStream.write(`${message}\n`),
   context = BACKGROUND_CONTEXT,
   confirmReset,
+  confirmDelete,
   reviewMaxChars = Number.parseInt(process.env.GERMAN_COACH_REVIEW_CHARS ?? "8000", 10),
 } = {}) {
   const databasePath = await ensurePrivateDataDirectory(dataDir);
@@ -392,13 +470,13 @@ export async function runCoach({
       } else if (command === "sync") {
         const [from, through] = args;
         const importedNow = await importPiWriting({ harness, root, context, sessionsDir, from, through: through ?? from });
-        output(`Imported ${importedNow.imported} new entries (${importedNow.aboveThreshold} ≥90%, ${importedNow.nearThreshold} 60–89%); ${importedNow.issues.length} source issues.`);
+        output(`Imported ${importedNow.imported} new entries (${importedNow.aboveThreshold} ≥90%, ${importedNow.nearThreshold} 60–89%); flagged ${importedNow.flaggedPasteBlocks} likely pasted blocks in ${importedNow.flaggedPasteEntries} entries; updated ${importedNow.candidateUpdates} prior entries; ${importedNow.issues.length} source issues.`);
         for (const issue of importedNow.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
       } else if (command === "review" || command === "progress") {
         const range = command === "progress" ? {} : parseReviewRange(args);
         const refreshed = await importPiWriting({ harness, root, context, sessionsDir, from: range.from, through: range.through });
-        if (refreshed.imported || refreshed.issues.length) {
-          output(`Pi import: ${refreshed.imported} new entries (${refreshed.aboveThreshold} ≥90%, ${refreshed.nearThreshold} 60–89%); ${refreshed.issues.length} source issues.`);
+        if (refreshed.imported || refreshed.candidateUpdates || refreshed.issues.length) {
+          output(`Pi import: ${refreshed.imported} new entries (${refreshed.aboveThreshold} ≥90%, ${refreshed.nearThreshold} 60–89%); flagged ${refreshed.flaggedPasteBlocks} likely pasted blocks in ${refreshed.flaggedPasteEntries} entries; ${refreshed.issues.length} source issues.`);
           for (const issue of refreshed.issues) output(`Import issue: ${issue.filePath}:${issue.line}: ${issue.message}`);
         }
         const entries = selectEntries(await getImportedWriting(harness, root, context), range.from, range.through);
@@ -419,7 +497,39 @@ export async function runCoach({
         }
       } else if (command === "list") {
         const entries = await getImportedWriting(harness, root, context);
-        output(entries.map(({ sourceKey, localDate, germanConfidence, excluded }) => `${excluded ? "excluded" : germanConfidence.toFixed(2)}\t${localDate}\t${sourceKey}`).join("\n") || "No imported writing.");
+        output(entries.map(({ sourceKey, localDate, germanConfidence, excluded, pasteCandidates = [] }) => {
+          const activeCandidates = pasteCandidates.filter((candidate) => (candidate.disposition ?? "review") === "review");
+          return `${excluded ? "excluded" : germanConfidence.toFixed(2)}${activeCandidates.length ? `\tpaste?${activeCandidates.length}` : ""}\t${localDate}\t${sourceKey}`;
+        }).join("\n") || "No imported writing.");
+      } else if (command === "paste-candidates") {
+        const entries = await getImportedWriting(harness, root, context);
+        const candidates = entries.flatMap((entry) => (entry.pasteCandidates ?? [])
+          .filter((candidate) => (candidate.disposition ?? "review") === "review")
+          .map((candidate) => ({ ...candidate, sourceKey: entry.sourceKey, localDate: entry.localDate })));
+        output(candidates.map(({ sourceKey, localDate, paragraphIndex, signals, text }) =>
+          `${sourceKey} (${localDate}), paragraph ${paragraphIndex} [${signals.join(", ")}]\n${text}`
+        ).join("\n\n") || "No likely pasted blocks flagged. Heuristics are only clues; they can miss pasted text or flag your own writing.");
+      } else if (command === "paste-keep" || command === "paste-delete") {
+        if (args.length !== 1) throw new Error(`Use /${command} SESSION_ID:ENTRY_ID:PARAGRAPH`);
+        const separator = args[0].lastIndexOf(":");
+        const sourceKey = args[0].slice(0, separator);
+        const paragraphIndex = Number(args[0].slice(separator + 1));
+        if (separator <= 0 || !Number.isSafeInteger(paragraphIndex) || paragraphIndex < 1) {
+          throw new Error(`Use /${command} SESSION_ID:ENTRY_ID:PARAGRAPH`);
+        }
+        const disposition = command === "paste-keep" ? "authored" : "deleted";
+        await setPasteCandidateDisposition({ harness, root, context, sourceKey, paragraphIndex, disposition });
+        output(disposition === "authored"
+          ? `Marked paragraph ${paragraphIndex} in ${sourceKey} as authored; it will remain in reviews without a paste warning.`
+          : `Removed paragraph ${paragraphIndex} in ${sourceKey} from future reviews; the original imported text is unchanged.`);
+      } else if (command === "delete") {
+        if (args.length !== 1 || !args[0].includes(":")) throw new Error("Use /delete SESSION_ID:ENTRY_ID");
+        const entries = await getImportedWriting(harness, root, context);
+        if (!entries.some((entry) => entry.sourceKey === args[0])) throw new Error(`No imported entry found for ${args[0]}`);
+        if (await confirmEntryDeletion(rl, output, confirmDelete, args[0])) {
+          await deleteImportedEntry({ harness, root, context, sourceKey: args[0] });
+          output(`Removed ${args[0]} from active coach imports. It will not be re-imported; the Pi transcript is unchanged.`);
+        }
       } else if (command === "exclude") {
         if (args.length !== 1 || !args[0].includes(":")) throw new Error("Use /exclude SESSION_ID:ENTRY_ID");
         const entries = await getImportedWriting(harness, root, context);

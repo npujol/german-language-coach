@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { acquireCoachLock, createReviewConversation, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, resetOversizedCoachContext, runCoach, validateLocalBaseUrl } from "../src/coach.mjs";
+import { acquireCoachLock, createReviewConversation, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, deleteImportedEntry, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, resetOversizedCoachContext, runCoach, setPasteCandidateDisposition, validateLocalBaseUrl } from "../src/coach.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -142,6 +142,52 @@ test("imports are idempotent, date-filtered, and source entries can be excluded 
     }, BACKGROUND_CONTEXT);
     assert.ok(await resetOversizedCoachContext(root, BACKGROUND_CONTEXT, 5000) > 5000);
     assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0].sourceKey, entries[0].sourceKey);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+});
+
+test("imports keep likely pasted paragraphs as review metadata", async () => {
+  const rootDir = await tempDir();
+  const sessionsDir = join(rootDir, "sessions");
+  await mkdir(sessionsDir);
+  const text = "Kannst du mir bitte helfen, diese Nachricht zu verstehen? Ich möchte wissen, ob der folgende Text höflich klingt.\n\n" +
+    "Please review the following detailed implementation requirements and explain how they should be applied. This paragraph contains copied English source material that is much longer than the surrounding German question. ".repeat(5);
+  await writeFile(join(sessionsDir, "session.jsonl"), [
+    JSON.stringify({ type: "session", id: "session-paste" }),
+    JSON.stringify(message("entry-paste", localNoon(today()), "user", text)),
+  ].join("\n"));
+
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    const result = await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    const entries = await getImportedWriting(harness, root, BACKGROUND_CONTEXT);
+    assert.equal(result.imported, 1);
+    assert.equal(result.flaggedPasteEntries, 1);
+    assert.equal(result.flaggedPasteBlocks, 1);
+    assert.match(entries[0].pasteCandidates[0].text, /^Please review/);
+    assert.equal(entries[0].text, text.trim(), "the heuristic must not alter or discard content beyond the importer's existing trim");
+
+    await setPasteCandidateDisposition({ harness, root, context: BACKGROUND_CONTEXT, sourceKey: entries[0].sourceKey, paragraphIndex: 2, disposition: "deleted" });
+    let updated = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.doesNotMatch(updated.reviewText, /^Please review/m);
+    assert.equal(updated.text, text.trim(), "deleting a candidate from reviews must preserve the imported source");
+    await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    updated = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.equal(updated.pasteCandidates[0].disposition, "deleted", "sync must preserve manual candidate decisions");
+    assert.doesNotMatch(updated.reviewText, /^Please review/m);
+
+    await setPasteCandidateDisposition({ harness, root, context: BACKGROUND_CONTEXT, sourceKey: entries[0].sourceKey, paragraphIndex: 2, disposition: "authored" });
+    await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    updated = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.equal(updated.pasteCandidates[0].disposition, "authored");
+    assert.match(updated.reviewText, /^Please review/m);
+
+    await deleteImportedEntry({ harness, root, context: BACKGROUND_CONTEXT, sourceKey: entries[0].sourceKey });
+    assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT)).length, 0);
+    const afterDeleteSync = await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    assert.equal(afterDeleteSync.imported, 0, "deleted source entries must not reappear on sync");
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
   }
