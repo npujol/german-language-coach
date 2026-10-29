@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/npujol/german-language-coach/compare/1.1.0...1.2.0) (2026-10-29)
+
+
+### Features
+
+* **import:** flag likely pasted writing ([f4b154d](https://github.com/npujol/german-language-coach/commit/f4b154d69b04fc5fd7409b83ca427610b14ed696))
+
 # [1.1.0](https://github.com/npujol/german-language-coach/compare/1.0.1...1.1.0) (2026-10-28)
 
 
