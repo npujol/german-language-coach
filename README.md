@@ -33,6 +33,7 @@ Only loopback endpoints (`127.0.0.1` or `[::1]`) are accepted. Coach requests us
 - `/paste-candidates` — inspect paragraphs heuristically flagged as possible pasted blocks, including the signals that triggered the flag.
 - `/paste-keep SESSION_ID:ENTRY_ID:PARAGRAPH` — mark a flagged paragraph as authored; the choice survives sync.
 - `/paste-delete SESSION_ID:ENTRY_ID:PARAGRAPH` — omit a flagged paragraph from future reviews while preserving the original imported text.
+- `/paste-delete-all` — confirm once to omit all currently flagged paragraphs from future reviews; original imported text stays unchanged.
 - `/delete SESSION_ID:ENTRY_ID` — confirm and remove an entry from active coach imports; a tombstone prevents re-import.
 - `/exclude SESSION_ID:ENTRY_ID` — omit an entry from future reviews without removing it from the active import list.
 - `/export [FILE]` — print a local export or create a new file without overwriting an existing file.

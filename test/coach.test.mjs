@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { acquireCoachLock, createReviewConversation, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, deleteImportedEntry, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, resetOversizedCoachContext, runCoach, setPasteCandidateDisposition, validateLocalBaseUrl } from "../src/coach.mjs";
+import { acquireCoachLock, createReviewConversation, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, deleteAllPasteCandidates, deleteImportedEntry, excludeImportedEntry, getImportedWriting, importPiWriting, localOnlyFetch, resetOversizedCoachContext, runCoach, setPasteCandidateDisposition, validateLocalBaseUrl } from "../src/coach.mjs";
 
 const roots = [];
 after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -188,6 +188,40 @@ test("imports keep likely pasted paragraphs as review metadata", async () => {
     assert.equal((await getImportedWriting(harness, root, BACKGROUND_CONTEXT)).length, 0);
     const afterDeleteSync = await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
     assert.equal(afterDeleteSync.imported, 0, "deleted source entries must not reappear on sync");
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+  }
+});
+
+test("bulk delete omits all active paste candidates from future reviews", async () => {
+  const rootDir = await tempDir();
+  const sessionsDir = join(rootDir, "sessions");
+  await mkdir(sessionsDir);
+  const authored = "Kannst du mir bitte helfen, diese beiden eingefügten Absätze einzuordnen? Ich lerne Deutsch und möchte nur meine eigenen Formulierungen üben.";
+  const pasteA = "Copied source material that is long enough to trigger the paste heuristic. ".repeat(12);
+  const pasteB = "Another copied source block that should also be detected as pasted material. ".repeat(12);
+  const sourceText = `${authored}\n\n${pasteA}\n\n${pasteB}`;
+  await writeFile(join(sessionsDir, "session.jsonl"), [
+    JSON.stringify({ type: "session", id: "session-paste-bulk" }),
+    JSON.stringify(message("entry-paste-bulk", localNoon(today()), "user", sourceText)),
+  ].join("\n"));
+
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+  try {
+    const root = await harness.root(BACKGROUND_CONTEXT);
+    await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    const before = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.equal(before.pasteCandidates.filter((candidate) => candidate.disposition === "review").length, 2);
+
+    const result = await deleteAllPasteCandidates({ harness, root, context: BACKGROUND_CONTEXT });
+    assert.deepEqual(result, { deletedBlocks: 2, changedEntries: 1 });
+    const afterDelete = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.equal(afterDelete.text, sourceText.trim());
+    assert.equal(afterDelete.reviewText, authored);
+
+    await importPiWriting({ harness, root, context: BACKGROUND_CONTEXT, sessionsDir });
+    const afterSync = (await getImportedWriting(harness, root, BACKGROUND_CONTEXT))[0];
+    assert.equal(afterSync.reviewText, authored, "sync must preserve bulk candidate deletion");
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
   }

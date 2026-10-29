@@ -278,6 +278,29 @@ export async function setPasteCandidateDisposition({ harness, root, context, sou
   }, context);
 }
 
+export async function deleteAllPasteCandidates({ harness, root, context }) {
+  let deletedBlocks = 0;
+  let changedEntries = 0;
+  await root.commit(async (tx) => {
+    const doc = await tx.doc(ImportedWriting, root.id);
+    for (const entry of doc.entries) {
+      let changed = false;
+      for (const candidate of entry.pasteCandidates ?? []) {
+        if ((candidate.disposition ?? "review") === "review") {
+          candidate.disposition = "deleted";
+          deletedBlocks++;
+          changed = true;
+        }
+      }
+      if (changed) {
+        changedEntries++;
+        entry.reviewText = reviewTextFor(entry.text, entry.pasteCandidates);
+      }
+    }
+  }, context);
+  return { deletedBlocks, changedEntries };
+}
+
 export function serializedContextSize(messages) {
   return Buffer.byteLength(JSON.stringify(messages), "utf8");
 }
@@ -357,6 +380,7 @@ function showUsage() {
     "  /delete SESSION:ENTRY   remove an entry and prevent it being re-imported",
     "  /paste-keep SESSION:ENTRY:PARAGRAPH  mark a candidate as authored",
     "  /paste-delete SESSION:ENTRY:PARAGRAPH  omit a candidate paragraph from reviews",
+    "  /paste-delete-all       confirm and omit all active candidates from reviews",
     "  /export [FILE]          export local writing and source metadata",
     "  /reset                  erase the complete coach database after confirmation",
     "  /help  /exit",
@@ -372,6 +396,16 @@ async function exportWriting(entries, path) {
   await writeFile(target, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
   await chmod(target, 0o600);
   return `Export written to ${target}`;
+}
+
+async function confirmBulkPasteDeletion(rl, output, confirmDelete, count) {
+  const prompt = `Omit all ${count} active paste candidates from future reviews? Original imported text stays unchanged. Type DELETE to confirm: `;
+  const answer = confirmDelete ? await confirmDelete(prompt) : await rl.question(prompt);
+  if (answer !== "DELETE") {
+    output("Paste-candidate deletion cancelled.");
+    return false;
+  }
+  return true;
 }
 
 async function confirmEntryDeletion(rl, output, confirmDelete, sourceKey) {
@@ -509,6 +543,18 @@ export async function runCoach({
         output(candidates.map(({ sourceKey, localDate, paragraphIndex, signals, text }) =>
           `${sourceKey} (${localDate}), paragraph ${paragraphIndex} [${signals.join(", ")}]\n${text}`
         ).join("\n\n") || "No likely pasted blocks flagged. Heuristics are only clues; they can miss pasted text or flag your own writing.");
+      } else if (command === "paste-delete-all") {
+        if (args.length) throw new Error("Use /paste-delete-all without arguments");
+        const entries = await getImportedWriting(harness, root, context);
+        const count = entries.reduce((total, entry) => total + (entry.pasteCandidates ?? []).filter((candidate) => (candidate.disposition ?? "review") === "review").length, 0);
+        if (!count) {
+          output("No active paste candidates to delete.");
+          continue;
+        }
+        if (await confirmBulkPasteDeletion(rl, output, confirmDelete, count)) {
+          const result = await deleteAllPasteCandidates({ harness, root, context });
+          output(`Omitted ${result.deletedBlocks} paste candidates from future reviews across ${result.changedEntries} entries. Original imported text is unchanged.`);
+        }
       } else if (command === "paste-keep" || command === "paste-delete") {
         if (args.length !== 1) throw new Error(`Use /${command} SESSION_ID:ENTRY_ID:PARAGRAPH`);
         const separator = args[0].lastIndexOf(":");
