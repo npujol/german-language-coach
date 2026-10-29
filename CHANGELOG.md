@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/npujol/german-language-coach/compare/1.2.0...1.3.0) (2026-10-29)
+
+
+### Features
+
+* **coach:** add /paste-delete-all bulk candidate removal ([5f59572](https://github.com/npujol/german-language-coach/commit/5f595729bf69ce682ba92000692541c004022b46))
+
 # [1.2.0](https://github.com/npujol/german-language-coach/compare/1.1.0...1.2.0) (2026-10-29)
 
 
